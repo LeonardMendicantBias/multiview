@@ -5,6 +5,24 @@ from scipy.spatial.transform import Rotation as R  # rotation axis ??? left-hand
 
 
 @dataclass
+class Line:
+    origin: np.ndarray
+    direction: np.ndarray
+
+
+def find_points(line_a: Line, line_b: Line):
+    n = np.cross(line_a.direction, line_b.direction)
+    d = np.abs(np.dot(n, line_a.origin - line_b.origin)) / np.linalg.norm(n)
+    
+    t_a = np.dot(np.cross(line_b.direction, n), (line_b.origin - line_a.origin)) / np.dot(n, n)
+    t_b = np.dot(np.cross(line_a.direction, n), (line_b.origin - line_a.origin)) / np.dot(n, n)
+
+    p_a = line_a.origin + t_a * line_a.direction
+    p_b = line_b.origin + t_b * line_b.direction
+
+    return (p_a + p_b) / 2
+    
+@dataclass
 class Camera:
     position: np.ndarray=np.array([0., 0., 0.])
     quaternion: np.ndarray=np.array([1., 0., 0., 0.])  # angle in quaternion
@@ -15,8 +33,10 @@ class Camera:
 
     @staticmethod
     def qm(quaternion1, quaternion0):
-        w0, x0, y0, z0 = quaternion0
-        w1, x1, y1, z1 = quaternion1
+        # w0, x0, y0, z0 = quaternion0
+        # w1, x1, y1, z1 = quaternion1
+        x0, y0, z0, w0 = quaternion0
+        x1, y1, z1, w1 = quaternion1
         
         return np.array([
             -x1*x0 - y1*y0 - z1*z0 + w1*w0,
@@ -41,5 +61,17 @@ class Camera:
 
     def world_to_camera(self, world_coor: List[np.ndarray]) -> List[np.ndarray]:
         camera_coor = [self.qm(self.qm(self.quaternion, coor), self.quaternion*self._inv) for coor in world_coor]
+        camera_coor = [coor[1:] - self.position for coor in camera_coor]
+        camera_coor = [(coor / (-coor[-1]))[:-1] for coor in camera_coor]
 
-        return world_coor
+        norm_coor = [(coor + self.sensor_size/2)/self.sensor_size for coor in camera_coor]
+
+        raster_coor = [
+            np.floor(np.array([
+                coor[0]*self.resolution[0],
+                (1-coor[1])*self.resolution[1],
+            ]))
+            for coor in norm_coor
+        ]
+
+        return raster_coor
