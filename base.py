@@ -33,16 +33,14 @@ class Camera:
 
     @staticmethod
     def qm(quaternion1, quaternion0):
-        # w0, x0, y0, z0 = quaternion0
-        # w1, x1, y1, z1 = quaternion1
-        x0, y0, z0, w0 = quaternion0
-        x1, y1, z1, w1 = quaternion1
+        w0, x0, y0, z0 = quaternion0
+        w1, x1, y1, z1 = quaternion1
         
         return np.array([
-            -x1*x0 - y1*y0 - z1*z0 + w1*w0,
-            x1*w0 - y1*z0 + z1*y0 + w1*x0,
-            x1*z0 + y1*w0 - z1*x0 + w1*y0,
-            -x1*y0 + y1*x0 + z1*w0 + w1*z0
+            w1*w0 - x1*x0 - y1*y0 - z1*z0,
+            w1*x0 + x1*w0 - y1*z0 + z1*y0,
+            w1*y0 + x1*z0 + y1*w0 - z1*x0,
+            w1*z0 - x1*y0 + y1*x0 + z1*w0
         ])
 
     @staticmethod
@@ -55,23 +53,44 @@ class Camera:
         self.position = self._convert_to_ndarray(self.position)
         self.quaternion = self._convert_to_ndarray(self.quaternion)
         self.resolution = self._convert_to_ndarray(self.resolution)
+        self.proj = self._convert_to_ndarray(self.proj).reshape(3, 3)
         self.sensor_size = self._convert_to_ndarray(self.sensor_size)
 
         self._inv = np.array([1, -1, -1, -1])
 
+        self.intrinsic = np.array([
+            [0, 0, self.resolution[0]/2],
+            [0, 0, self.resolution[1]/2],
+            [0, 0, 0],
+        ]) + self.proj
+
+    # def world_to_camera(self, world_coor: List[np.ndarray]) -> List[np.ndarray]:
+    #     world_coor = [np.insert(coor, 0, 0) for coor in world_coor]
+    #     camera_coor = [self.qm(self.qm(self.quaternion, coor), self.quaternion*self._inv) for coor in world_coor]
+    #     camera_coor = [coor[1:] - self.position for coor in camera_coor]
+    #     # camera_coor = [np.matmul(c71.63506oor, self.proj) for coor in camera_coor]
+    #     camera_coor = [
+    #         (coor / (-coor[-1]))[:-1]
+    #         for coor in camera_coor
+    #     ]
+
+    #     norm_coor = [(coor + self.sensor_size/2)/self.sensor_size for coor in camera_coor]
+        
+    #     raster_coor = [
+    #         np.floor(np.array([
+    #             coor[0]*self.resolution[0],
+    #             coor[1]*self.resolution[1],
+    #             # (1-coor[1])*self.resolution[1],
+    #         ]))
+    #         for coor in norm_coor
+    #     ]
+
+    #     return raster_coor
+
     def world_to_camera(self, world_coor: List[np.ndarray]) -> List[np.ndarray]:
-        camera_coor = [self.qm(self.qm(self.quaternion, coor), self.quaternion*self._inv) for coor in world_coor]
-        camera_coor = [coor[1:] - self.position for coor in camera_coor]
-        camera_coor = [(coor / (-coor[-1]))[:-1] for coor in camera_coor]
+        # world_coor = [np.insert(coor, 3, 0) for coor in world_coor]
 
-        norm_coor = [(coor + self.sensor_size/2)/self.sensor_size for coor in camera_coor]
+        camera_coor = world_coor
+        homo_camera_coor = [np.append(coor, 1) for coor in camera_coor]
 
-        raster_coor = [
-            np.floor(np.array([
-                coor[0]*self.resolution[0],
-                (1-coor[1])*self.resolution[1],
-            ]))
-            for coor in norm_coor
-        ]
-
-        return raster_coor
+        return homo_camera_coor
