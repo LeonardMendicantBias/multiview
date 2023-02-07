@@ -111,13 +111,10 @@ class Camera:
         ]
         q_ = self.quaternion
         camera_coor = [
-            # self.qm_2(self.quaternion, coor)
             self.qm_2(np.array([q_[0], -q_[1], -q_[2], -q_[3]]), coor)
             for coor in camera_coor
         ]
 
-        # return [Line.from_camera_coor(np.zeros(3), coor) for coor in camera_coor]
         return [Line.from_camera_coor(self.position, coor) for coor in camera_coor]
 
-    def camera_to_ray(self, camera_coor): ...
 
