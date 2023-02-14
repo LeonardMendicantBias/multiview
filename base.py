@@ -20,13 +20,16 @@ class Line:
 def find_points(line_a: Line, line_b: Line):
     d = line_b.origin - line_a.origin
     u = np.dot(line_a.direction, line_b.direction)
+    e = np.dot(line_a.direction, d)
+    f = np.dot(line_b.direction, d)
 
-    r_1 = ((np.dot(line_a.direction, d)) - u*np.dot(line_b.direction, d)) / (1 - u**2)
-    r_2 = ((np.dot(line_b.direction, d)) - u*np.dot(line_a.direction, d)) / (u**2 - 1)
+    r_1 = (e - u*f) / (1 - u**2)
+    r_2 = (f - u*e) / (u**2 - 1)
 
     p1 = line_a.point(r_1)
     p2 = line_b.point(r_2)
 
+    # print(p1, p2)
     return (p1 + p2) / 2
     
 @dataclass
@@ -111,6 +114,7 @@ class Camera:
         ]
         q_ = self.quaternion
         camera_coor = [
+            # self.qm_2(self.quaternion, coor)
             self.qm_2(np.array([q_[0], -q_[1], -q_[2], -q_[3]]), coor)
             for coor in camera_coor
         ]
