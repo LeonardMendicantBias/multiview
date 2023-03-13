@@ -1,5 +1,6 @@
 import os
 import torch
+import torch.nn.functional as F
 from dataclasses import dataclass, field
 import numpy as np
 from PIL import Image
@@ -24,22 +25,6 @@ class Line:
     
     def point(self, r):
         return self.origin + r*self.direction
-
-
-def find_points(line_a: Line, line_b: Line):
-    d = line_b.origin - line_a.origin
-    u = np.dot(line_a.direction, line_b.direction)
-    e = np.dot(line_a.direction, d)
-    f = np.dot(line_b.direction, d)
-
-    r_1 = (e - u*f) / (1 - u**2)
-    r_2 = (f - u*e) / (u**2 - 1)
-
-    p1 = line_a.point(r_1)
-    p2 = line_b.point(r_2)
-
-    # print(p1, p2)
-    return (p1 + p2) / 2
     
 
 @dataclass
@@ -150,7 +135,7 @@ class Location:
     @classmethod
     def from_info(cls, info, rotation, offset):
         ret = Camera.qm_2(
-            rotation,
+            rotation*np.array([1, -1, -1, -1]),
             np.array(info['translation'])
         )
         return cls(ret + offset)
@@ -178,9 +163,10 @@ class DeepCamera(Camera):
         
         image = Image.open(self.filename).convert('RGB')
         human_pred = result[0][0]
+        
         self.preds = []
         # for pred in human_pred:
-        for pred, pred_ in zip(human_pred, self.gt_bboxes):
+        for pred in human_pred:
             if pred[-1] < 0.9:
                 continue
             bbox = BoundingBox(
@@ -188,25 +174,50 @@ class DeepCamera(Camera):
                 center=np.array([(pred[0] + pred[2])/2, (pred[1] + pred[3])/2]),
                 size=np.array([(pred[2]-pred[0])/2, (pred[3]-pred[1])/2])
             )
-            tl, br = pred_.center - pred_.size, pred_.center + pred_.size
+            tl, br = bbox.center - bbox.size, bbox.center + bbox.size
             image_ = image.crop((*tl, *br))
             image_tensor = torch.tensor(np.array(image_), dtype=torch.float32).permute((2, 0, 1)).unsqueeze(0)
             
             image_tensor = self.preprocess(image_tensor)
             with torch.no_grad():
                 box_feature = self.resnet(image_tensor.cuda())
+                print(box_feature.shape)
             # print(box_feature[0][:20])
 
-            self.preds.append(
-                (bbox, pred[-1], box_feature[0].cpu(), self.pixel_to_ray([np.array([(pred[0] + pred[2])/2, (pred[1] + pred[3])/2])])[0])
-            )
-        print('-'*30)
+            t, l = tl
+            b, r = br
+            max_iou = 0
+            for _, gt_box in self.gt_bboxes:
+                tl_, br_ = gt_box.center - gt_box.size, gt_box.center + gt_box.size
+                t_, l_ = tl_
+                b_, r_ = br_
+
+                o = np.array([max(t, t_), max(l, l_)])
+                u = np.array([min(b, b_), min(r, r_)])
+
+                w = u[0] - o[0]
+                h = u[1] - o[1]
+                intersection = w * h
+                union = ((b-t)*(r-l)) + ((b_-t_)*(r_-l_)) - intersection
+                iou = intersection / (union + 1e-8)
+                max_iou = max(max_iou, iou)
+
+            self.preds.append((
+                bbox,
+                pred[-1],
+                max_iou,
+                box_feature[0].cpu(),
+                self.pixel_to_ray([np.array([(pred[0] + pred[2])/2, (pred[1] + pred[3])/2])])[0]
+                # self.pixel_to_ray([bbox.center])[0]
+            ))
+            # print('a'*30)
+        
+        self.gt_lines = [(box.instanceId, self.pixel_to_ray([box.center])[0]) for box in self.gt_bboxes]
             
     @classmethod
     def from_capture(cls, f_dir, capture, object_detector, resnet, preprocess):
         camera = Camera.from_capture(f_dir, capture)
         annotations = [anno['values'] for anno in capture['annotations'] if '2D' in anno['id']][0]
-        # anno_3d = [(anno['instanceId'], Location.from_info(anno, rotation, offset)) for anno in anno_3d if obj_name in anno['labelName']]
         return cls(
             filename=camera.filename,
             position=camera.position,
@@ -226,33 +237,62 @@ class Scene:
     def __init__(self, f_dir, cameras: List[DeepCamera], locations: List[Location]):
         self.f_dir = f_dir
         self.cameras = cameras
-        self.object_pairs = self._object_pairing()
+        self.locations = locations
+        # self.object_pairs = self._object_pairing()
+
+        self.gt_locations = self._get_locations()
+
+    @staticmethod
+    def _find_points(line_a: Line, line_b: Line):
+        d = line_b.origin - line_a.origin
+        u = np.dot(line_a.direction, line_b.direction)
+        e = np.dot(line_a.direction, d)
+        f = np.dot(line_b.direction, d)
+
+        r_1 = (e - u*f) / (1 - u**2)
+        r_2 = (f - u*e) / (u**2 - 1)
+
+        p1 = line_a.point(r_1)
+        p2 = line_b.point(r_2)
+
+        return (p1 + p2) / 2
+    
+    def _get_locations(self):
+        camera_0 = self.cameras[0]
+        camera_1 = self.cameras[1]
+
+        locations = []
+        for line_a in camera_0.gt_lines:
+            for line_b in camera_1.gt_lines:
+                if line_a[0] == line_b[0]:  # same instance_id
+                    locations.append((line_a[0], self._find_points(line_a[1], line_b[1])))
+                    break
+        return locations
 
     def _object_pairing(self):
         camera_0 = self.cameras[0].preds
         camera_1 = self.cameras[1].preds
 
-        features_1 = torch.stack([pred[2] for pred in camera_1])
-        # print(features_1[:, :10])
+        features_1 = torch.stack([pred[3] for pred in camera_1])
 
         for i, pred in enumerate(camera_0):
-            feature = pred[2]
+            feature = pred[3]
             # print(feature[:10])
             similarity = F.cosine_similarity(feature.unsqueeze(0), features_1)
             # print(similarity)
             print(i, 'and', similarity.argmax(0))
 
-        for camera in self.cameras:
-            img = Image.open(camera.filename)
-            for pred in camera.preds:
-                bbox = pred[0]
-                tl, br = bbox.center - bbox.size, bbox.center + bbox.size
-                crop = img.crop((*tl, *br))
-                plt.imshow(crop)
-                plt.axis('off')
-                plt.show()
+        # for camera in self.cameras:
+        #     img = Image.open(camera.filename)
+        #     for pred in camera.preds:
+        #         bbox = pred[0]
+        #         tl, br = bbox.center - bbox.size, bbox.center + bbox.size
+        #         crop = img.crop((*tl, *br))
+        #         plt.imshow(crop)
+        #         plt.axis('off')
+        #         plt.show()
 
-            print('-'*30)
+        #     print('-'*30)
 
         return None
 
@@ -260,15 +300,18 @@ class Scene:
     def from_captures(cls, f_dir, captures, object_detector, resnet, preprocess):
         cameras = [DeepCamera.from_capture(f_dir, capture, object_detector, resnet, preprocess) for capture in captures]
         
+        anno_3d = [anno['values'] for anno in captures[0]['annotations'] if '3D' in anno['id']][0]
+        anno_3d = [
+            (anno['instanceId'], Location.from_info(anno, cameras[0].quaternion, cameras[0].position))
+            for anno in anno_3d if 'Person' in anno['labelName']
+        ]
         return cls(
             f_dir=f_dir,
             cameras=cameras,
-            locations=[]
+            locations=anno_3d
         )
     
-    def _show_bbox(self, bboxes):
-        fig, ax = plt.subplots()
-        ax.imshow(mpimg.imread(self.filename))
+    def _show_bbox(self, ax, bboxes):
         for bbox in bboxes:
             ax.add_patch(
                 patches.Rectangle(
@@ -277,13 +320,39 @@ class Scene:
                     linewidth=1, edgecolor='r', facecolor='none'
                 )
             )
-        plt.axis('off')
-        plt.show()
     
     def show_gt_bboxes(self):
+        # colors = ['blue', 'purple']
+        colors = ['red', 'red']
         for camera in self.cameras:
-            self._show_bbox(camera.gt_bboxes)
+            fig, ax = plt.subplots()
+            ax.imshow(mpimg.imread(camera.filename))
+            # self._show_bbox(ax, camera.gt_bboxes)
+            for i, bbox in enumerate(camera.gt_bboxes):
+                ax.add_patch(
+                    patches.Rectangle(
+                        bbox.center - bbox.size,
+                        2*bbox.size[0], 2*bbox.size[1],
+                        linewidth=2, edgecolor=colors[i], facecolor='none'
+                    )
+                )
+            plt.axis('off')
+            plt.show()
     
     def show_pred_bboxes(self):
+        colors = ['blue', 'purple']
+        colors = ['red', 'red']
         for camera in self.cameras:
-            self._show_bbox([pred[0] for pred in camera.preds])
+            fig, ax = plt.subplots()
+            ax.imshow(mpimg.imread(camera.filename))
+            # self._show_bbox([pred[0] for pred in camera.preds])
+            for i, bbox in enumerate([pred[0] for pred in camera.preds]):
+                ax.add_patch(
+                    patches.Rectangle(
+                        bbox.center - bbox.size,
+                        2*bbox.size[0], 2*bbox.size[1],
+                        linewidth=2, edgecolor=colors[i], facecolor='none'
+                    )
+                )
+            plt.axis('off')
+            plt.show()
